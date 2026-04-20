@@ -1,7 +1,9 @@
-# LifeVault
-**A privacy-first, locally-hosted Recursive Language Model (RLM) that agentically reasons over your personal knowledge vault.**
+# LifeVault v2.0
+**A production-ready, privacy-first, locally-hosted Recursive Language Model (RLM) that agentically reasons over your personal knowledge vault.**
 
 LifeVault solves the problem of "context window rot" inherently found in modern massive LLMs. By combining standard Retrieval-Augmented Generation (RAG) with a local agentic reasoning loop inspired by Zhang et al.'s *Recursive Language Models*, LifeVault can query gigabytes of personal PDFs or Markdown notes on consumer hardware without losing tracking accuracy.
+
+In **v2.0**, LifeVault ships with full conversational memory, a reactive backend, robust background process management, and strict context limit guards to prevent context degradation.
 
 > [!TIP]
 > Everything runs **100% locally** on your machine. Your personal notes, medical history, legal files, or lecture notes never leave your hard drive.
@@ -42,56 +44,69 @@ The workspace is highly modularized for production safety and logging.
 
 ```text
 trial/
-├── lifevault.py          # Core Engine: Handles ChromaDB, Embedding, and recursive LLM loops
-├── app.py                # Frontend: Streams generator statuses dynamically using Gradio
-├── requirements.txt      # PIP dependencies
+├── lifevault.py          # Core Engine: Handles ChromaDB, Embedding, caching, and recursive LLM loops (v2.0)
+├── app.py                # Frontend: Streams generator statuses dynamically using Gradio (v2.0)
+├── requirements.txt      # Pinned PIP dependencies for reproducibility
 ├── my_vault/             # YOUR DIRECTORY: Drop .md, .txt, and .pdf files here to be parsed.
 ├── scripts/              
-│   └── start.sh          # Background boot script
-├── logs/                 # Output debug directory
+│   └── start.sh          # Background boot script and process manager
+├── logs/                 
 │   ├── app.log           # Web-app crash & status log
+│   ├── lifevault.pid     # Process identifier for the background service
 │   └── lifevault_debug.log # Highly-detailed chunk indexing and Ollama timing log
-├── docs/                 # Reference documents (Recursive Language Models paper)
+├── docs/                 # Reference documents
 └── .lifevault_db/        # Auto-constructed Vector DB (DO NOT DELETE)
 ```
 
 ---
 
-## 🖥 Usage
+## 🖥 Server Management (New in v2.0)
 
-### Starting the Server
-You do not need to run python manually or occupy your terminal. We have provided a daemon script.
+You do not need to run Python manually or keep a terminal open. We provide a robust daemon script `start.sh` to control the application cluster in the background.
 
-From the root directory, simply run:
+From the root directory of the project, you have 4 commands:
+
 ```bash
-./scripts/start.sh
+# Safely start the server in the background
+./scripts/start.sh start
+
+# Check if the server is running and what its Process ID and port are
+./scripts/start.sh status
+
+# Kill the server safely
+./scripts/start.sh stop
+
+# Hot-restart the server (useful after updating code)
+./scripts/start.sh restart
 ```
-This automatically boots `app.py` in the background and suppresses output to the `logs/` directory.
 
 ### Accessing the Web Application
-Open your native browser and traverse to:
+Once running, open your native browser and traverse to:
 👉 **[http://localhost:7860](http://localhost:7860)**
 
 ---
 
-## 🧠 Reasoning Modes Explained
+## 🧠 Reasoning Modes & Memory
 
-The user interface exposes three primary tabs for traversing your knowledge base:
+The v2.0 engine has been tuned with automatic chat history tracking and optimized LLM parsing:
 
 ### 1. 📁 Ingest Vault (The Foundation)
-Whenever you dump new files into `my_vault/`, you must click **Ingest**. 
-The backend breaks down your documents using `pdfplumber`, embeds them using `sentence-transformers`, strips corrupted fonts automatically, blocks duplicates, and natively syncs into `ChromaDB`. Progress is streamed live in the UI.
+Whenever you dump new files into `my_vault/`, navigate to the **Ingest Vault** tab and press Ingest. 
+The backend breaks down your documents using `pdfplumber`, embeds them using `sentence-transformers`, strips corrupted fonts automatically, hashes content by position, and natively syncs into `ChromaDB`. Progress is streamed live in the UI.
 
-### 2. ⚡ Fast Lookup (Standard RAG)
-Optimized purely for speed (~10 to 15 seconds). 
-Takes your literal string, fetches the 5 most mathematically similar chunks from the vault, and executes a one-shot summary. Use this for direct questions.
+### 2. 💬 Chat Mode: Fast Lookup 
+Optimized purely for speed (~5 to 15 seconds), and streams tokens live. 
+Takes your literal string, fetches the most mathematically similar chunks from the vault & previous memory, and executes a one-shot summary. Use this for direct questions.
 
-### 3. 🧠 Deep Reasoning (RLM Paradigm)
+### 3. 💬 Chat Mode: Deep Reasoning (RLM Paradigm)
 Optimized for highly analytical, multi-hop problems traversing completely separate documents.
 1. The AI reads your prompt and generates smaller sub-questions based on what it lacks.
-2. It executes an inner `while` loop, asking itself the subquestions and querying ChromaDB independently each time. 
-3. It gathers all the sub-answers into a master synthetic prompt to summarize an overarching theory.
+2. It executes an inner `while` loop, asking itself the subquestions and querying ChromaDB implicitly. 
+3. It gathers all the sub-answers into a master synthetic prompt explicitly guarded against context limits (`MAX_CONTEXT_CHARS`) to summarize an overarching theory.
 *(Note: Watch the UI **Reasoning Trace** live as it thinks!)*
+
+### Persistent Memory
+Every output generated by the LLM is written to background vectors! You can explicitly query your own past conversational history, e.g. "What did we talk about yesterday regarding taxes?" To wipe memory while preserving your document vault, hit the **Clear Memory Only** danger button in the backend.
 
 ---
 
@@ -102,12 +117,12 @@ Optimized for highly analytical, multi-hop problems traversing completely separa
 
 | Issue | Resolution |
 | :--- | :--- |
-| **"Error communicating with local LLM"** | Ensure the Ollama daemon is actively running in the background. |
-| **PDF parsing errors** | Some PDFs are encrypted or corrupted; the engine will bypass them and explicitly name them in `logs/lifevault_debug.log`. |
-| **Empty Answer Sets** | Confirm that `my_vault/` exists and that completing Step 1 (Ingest Vault) occurred with >0 indexed chunks. |
+| **"🔴 Model offline" in header** | Ensure the Ollama daemon is actively running in the background (`ollama serve`). |
+| **UI starts but no Answer Sets** | You haven't imported data! Confirm that `my_vault/` exists and you clicked **Ingest**. |
+| **Hanging/Slow Responses** | Use `./scripts/start.sh restart` to flush the app's cache and restart it globally. |
+| **PDF parsing errors** | Some PDFs are encrypted; the engine will bypass them and explicitly name them in `logs/lifevault_debug.log`. |
 
-### Diagnostic Logging
-If Deep Reasoning ever appears stuck or slow, monitor the dedicated logger which tracks explicit HTTP request cycle times to your local LLM down to the millisecond:
 ```bash
+# Monitor the live debug stream down to the millisecond
 tail -f logs/lifevault_debug.log
 ```
