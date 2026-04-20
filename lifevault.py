@@ -669,11 +669,13 @@ def fast_query(user_question: str, history: list | None = None) -> Generator:
     history_str = _safe_history(history)
 
     prompt = (
-        f"Answer the question below using ONLY the provided notes. "
-        f"Be direct and concise. Cite filenames in brackets.\n\n"
+        f"You are LifeVault, a personal AI assistant.\n"
+        f"Respond to the user based on the provided notes and the recent conversation history.\n"
+        f"IMPORTANT: If the user is telling you a new fact or updating information (e.g., 'I bought a car', 'my dog is named X'), gently acknowledge it and confirm you will remember it, rather than just saying it's not in the notes.\n"
+        f"When answering questions based on the notes, be direct and cite filenames in brackets.\n\n"
         f"Recent conversation:\n{history_str}\n\n"
-        f"Question: {user_question}\n\n"
-        f"Notes:\n{ctx}\n\nAnswer:"
+        f"User Input: {user_question}\n\n"
+        f"Retrieved Notes:\n{ctx}\n\nAnswer:"
     )
 
     # Stream tokens

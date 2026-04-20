@@ -337,7 +337,7 @@ def do_export(history: list) -> str:
 
 # ── Build UI ──────────────────────────────────────────────────────────────────
 
-with gr.Blocks(css=CSS, theme=gr.themes.Base(), title="LifeVault") as demo:
+with gr.Blocks(title="LifeVault") as demo:
 
     # ── Header ──────────────────────────────────────────────────────────────
     gr.HTML("""
@@ -377,7 +377,6 @@ with gr.Blocks(css=CSS, theme=gr.themes.Base(), title="LifeVault") as demo:
                 elem_classes=["chatbot-wrap"],
                 height=420,
                 show_label=False,
-                type="messages",
             )
 
             # Input row
@@ -532,4 +531,6 @@ if __name__ == "__main__":
         server_port=7860,
         share=False,
         show_error=True,
+        css=CSS,
+        theme=gr.themes.Base(),
     )
