@@ -64,7 +64,7 @@ OLLAMA_MODEL   = "qwen2.5:7b"
 EMBED_MODEL    = "all-MiniLM-L6-v2"
 CHUNK_SIZE     = 800          # [BUG-07 adj] larger chunks → less mid-sentence cuts
 CHUNK_OVERLAP  = 120
-MEMORY_K       = 5            # [FEAT-09] memory chunks per query
+MEMORY_K       = 10           # [FEAT-09] memory chunks per query
 NOTES_K        = 8            # [FEAT-09] document chunks per query (notes > memory)
 MAX_SUB_CALLS  = 4
 LLM_TIMEOUT    = 120          # [FEAT-04] seconds before ask_llm gives up
@@ -212,7 +212,10 @@ def chunk_text(text: str, source: str) -> list[dict]:
         end = min(start + CHUNK_SIZE, len(text))
         chunk = text[start:end].strip()
         if len(chunk) > 60:
-            chunk_id = hashlib.md5(f"{source}::{idx}".encode()).hexdigest()
+            if source == "chat_history.md":
+                chunk_id = hashlib.md5(chunk.encode()).hexdigest()
+            else:
+                chunk_id = hashlib.md5(f"{source}::{idx}".encode()).hexdigest()
             chunks.append({"text": chunk, "source": source, "id": chunk_id})
             idx += 1
         start += CHUNK_SIZE - CHUNK_OVERLAP
@@ -235,8 +238,8 @@ def ingest_vault(vault_dir: str = VAULT_DIR) -> Generator:
     files = []
     for ext in extensions:
         files.extend(folder.rglob(ext))
-    # Never index the auto-generated chat history file
-    files = [f for f in files if f.name != "chat_history.md"]
+    # [BUG-FIX] Keep chat_history.md so memories survive DB rebuilds
+    # files = [f for f in files if f.name != "chat_history.md"]
 
     if not files:
         yield f"⚠️  No supported files in {vault_dir}.", 0.0
@@ -259,11 +262,12 @@ def ingest_vault(vault_dir: str = VAULT_DIR) -> Generator:
             if collection.get(ids=[chunk["id"]])["ids"]:
                 continue
             emb = embedder.encode(chunk["text"]).tolist()
+            _type = "memory" if chunk["source"] == "chat_history.md" else "document"
             collection.add(
                 ids=[chunk["id"]],
                 embeddings=[emb],
                 documents=[chunk["text"]],
-                metadatas=[{"source": chunk["source"], "type": "document"}],
+                metadatas=[{"source": chunk["source"], "type": _type}],
             )
             file_new += 1
             total_new += 1
@@ -633,7 +637,8 @@ def rlm_query(user_question: str, history: list | None = None) -> Generator:
         f"RULES:\n"
         f"- Memory logs have timestamps [YYYY-MM-DD]. Newer = more current truth.\n"
         f"- Clearly separate confirmed facts from inferences.\n"
-        f"- Cite the source filename in brackets when referencing specific notes.\n\n"
+        f"- Cite the source filename in brackets when referencing specific notes.\n"
+        f"- If the research findings lack the answer, answer using your pre-trained world knowledge but you MUST explicitly declare: '(Note: This is from general knowledge, not your vault).'\n\n"
         f"Recent conversation:\n{history_str}\n\n"
         f"Question: {user_question}\n\n"
         f"Research findings:\n{all_sub}\n\n"
@@ -671,7 +676,9 @@ def fast_query(user_question: str, history: list | None = None) -> Generator:
     prompt = (
         f"You are LifeVault, a personal AI assistant.\n"
         f"Respond to the user based on the provided notes and the recent conversation history.\n"
-        f"IMPORTANT: If the user is telling you a new fact or updating information (e.g., 'I bought a car', 'my dog is named X'), gently acknowledge it and confirm you will remember it, rather than just saying it's not in the notes.\n"
+        f"IMPORTANT: Memory logs contain timestamps. Always trust the newer timestamp over older conflicting ones.\n"
+        f"If the user is telling you a new fact or updating information (e.g., 'I bought a car', 'my dog is named X'), gently acknowledge it and confirm you will remember it.\n"
+        f"If the provided notes and history do not contain the answer to the user's question, clearly state that you do not have that information recorded.\n"
         f"When answering questions based on the notes, be direct and cite filenames in brackets.\n\n"
         f"Recent conversation:\n{history_str}\n\n"
         f"User Input: {user_question}\n\n"
