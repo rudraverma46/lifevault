@@ -3,3 +3,5 @@ LIFEVAULT_1/
 .lifevault_db/
 logs/
 my_vault/
+.env
+.pytest_cache/

@@ -19,18 +19,42 @@ UI improvements over v1
 [UI-11] Improved CSS — scrollable evidence, sticky input bar, better mobile
 """
 
+import copy
+import html
+import math
+import os
+import re
+import sys
+
+from security import (
+    ConfigError, PathValidationError, get_server_settings, resolve_ingest_path,
+)
+
+# [SEC-01] Validate host/port/auth BEFORE loading the engine (model + DB), so a
+# bad or unsafe configuration fails fast and start.sh's liveness check sees it.
+if __name__ == "__main__":
+    try:
+        SERVER_SETTINGS = get_server_settings()
+    except ConfigError as _cfg_err:
+        print(f"LifeVault configuration error: {_cfg_err}", file=sys.stderr)
+        sys.exit(2)
+
 import gradio as gr
 from lifevault import (
     ingest_vault, rlm_query, fast_query, clear_memory,
     startup_health_check, get_vault_stats,
     VAULT_DIR, collection,
 )
+import lifevault as _engine
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
+# [SEC-04] No external font requests: the DM fonts are used only if installed
+# locally; otherwise the system-font fallbacks below apply.
 CSS = """
-@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap');
-
 :root {
+    --font-sans:  'DM Sans', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --font-mono:  'DM Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+    --font-serif: 'DM Serif Display', Georgia, 'Times New Roman', serif;
     --bg:       #0a0b10;
     --surface:  #13151f;
     --card:     #191c28;
@@ -47,7 +71,7 @@ CSS = """
 /* ── Base ── */
 body, .gradio-container {
     background: var(--bg) !important;
-    font-family: 'DM Sans', sans-serif !important;
+    font-family: var(--font-sans) !important;
     color: var(--text) !important;
 }
 .block, .form { background: transparent !important; border: none !important; }
@@ -60,7 +84,7 @@ body, .gradio-container {
     margin-bottom: 1.5rem;
 }
 .lv-title {
-    font-family: 'DM Serif Display', serif;
+    font-family: var(--font-serif);
     font-size: 2.8rem;
     letter-spacing: -0.03em;
     color: var(--text);
@@ -70,7 +94,7 @@ body, .gradio-container {
 .lv-tagline {
     font-size: 0.82rem;
     color: var(--muted);
-    font-family: 'DM Mono', monospace;
+    font-family: var(--font-mono);
     letter-spacing: 0.08em;
     margin-top: 0.3rem;
 }
@@ -92,7 +116,7 @@ body, .gradio-container {
     border-radius: 999px;
     padding: 0.28rem 0.9rem;
     font-size: 0.78rem;
-    font-family: 'DM Mono', monospace;
+    font-family: var(--font-mono);
     color: var(--teal);
 }
 .lv-badge.error { color: var(--red); border-color: rgba(247,95,106,0.3); }
@@ -100,7 +124,7 @@ body, .gradio-container {
 
 /* ── Tabs ── */
 .tab-nav button {
-    font-family: 'DM Sans', sans-serif !important;
+    font-family: var(--font-sans) !important;
     font-weight: 500 !important;
     color: var(--muted) !important;
     background: transparent !important;
@@ -119,7 +143,7 @@ textarea, input[type=text] {
     border: 1px solid var(--border) !important;
     border-radius: 10px !important;
     color: var(--text) !important;
-    font-family: 'DM Sans', sans-serif !important;
+    font-family: var(--font-sans) !important;
     font-size: 0.97rem !important;
     transition: border-color 0.15s, box-shadow 0.15s !important;
 }
@@ -135,7 +159,7 @@ button.primary {
     color: #fff !important;
     border: none !important;
     border-radius: 8px !important;
-    font-family: 'DM Sans', sans-serif !important;
+    font-family: var(--font-sans) !important;
     font-weight: 500 !important;
     transition: opacity 0.15s !important;
 }
@@ -145,7 +169,7 @@ button.secondary {
     color: var(--text) !important;
     border: 1px solid var(--border) !important;
     border-radius: 8px !important;
-    font-family: 'DM Sans', sans-serif !important;
+    font-family: var(--font-sans) !important;
     transition: border-color 0.15s !important;
 }
 button.secondary:hover { border-color: var(--accent) !important; }
@@ -175,7 +199,7 @@ button.secondary:hover { border-color: var(--accent) !important; }
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 0.9rem 1.1rem;
-    font-family: 'DM Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 0.78rem;
     color: var(--teal);
     white-space: pre-wrap;
@@ -198,7 +222,7 @@ button.secondary:hover { border-color: var(--accent) !important; }
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 0.9rem 1.1rem;
-    font-family: 'DM Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 0.8rem;
     color: var(--teal);
     white-space: pre-wrap;
@@ -234,11 +258,13 @@ def build_status_html() -> str:
     health = startup_health_check()
     stats  = get_vault_stats()
 
-    model_badge = (
-        '<span class="lv-badge">🟢 Model online</span>'
-        if health["model"]
-        else '<span class="lv-badge error">🔴 Model offline — run: ollama serve</span>'
-    )
+    if health["model"]:
+        model_badge = '<span class="lv-badge">🟢 Model online</span>'
+    elif health.get("server"):   # [LLM-05] server up, configured tag missing
+        model_badge = (f'<span class="lv-badge error">🔴 Model not installed — run: '
+                       f'ollama pull {html.escape(_engine.OLLAMA_MODEL)}</span>')
+    else:
+        model_badge = '<span class="lv-badge error">🔴 Model offline — run: ollama serve</span>'
     vault_badge = (
         f'<span class="lv-badge">⬡ {stats["documents"]} docs · '
         f'{stats["memories"]} memories · {stats["total"]} chunks</span>'
@@ -261,14 +287,40 @@ def format_trajectory(trajectory: list) -> str:
     return "\n".join(lines)
 
 
+def _rel_text(r) -> str | None:
+    return f"{r:.2f}" if isinstance(r, (int, float)) and not isinstance(r, bool) and math.isfinite(r) else None
+
+
 def format_evidence(evidence: list) -> str:
     if not evidence:
         return "No evidence retrieved."
     lines = []
     for i, chunk in enumerate(evidence, 1):
-        src_type = "💭 Memory" if "chat_history" in chunk.get("source", "") else "📄 Note"
-        lines.append(f"[{i}] {src_type} · {chunk['source']}")
-        lines.append(f"    {chunk['text'][:240].strip()}…")
+        source = str(chunk.get("source") or "unknown")
+        # [RET-04] Prefer the engine's real type; fall back to the old heuristic.
+        kind = chunk.get("_type") or ("memory" if "chat_history" in source else "document")
+        src_type = "💭 Memory" if kind == "memory" else "📄 Note"
+        rel = _rel_text(chunk.get("relevance"))
+        rel_s = f" · relevance {rel}" if rel else ""
+        used = chunk.get("used_in") if isinstance(chunk.get("used_in"), list) else []
+        used_s = f" · used in: {', '.join(str(u) for u in used)}" if used else ""
+        trunc_s = " · truncated" if chunk.get("truncated") else ""
+        # [RET-08] Deep mode: if steps saw this excerpt with different relevance
+        # (or truncation), show each step's own values.
+        uses = [u for u in chunk.get("uses") if isinstance(u, dict) and u.get("step")] \
+            if isinstance(chunk.get("uses"), list) else []
+        step_rels = [_rel_text(u.get("relevance")) for u in uses]
+        if uses and (len(set(step_rels)) > 1 or any(u.get("truncated") for u in uses)):
+            known = sorted({float(r) for r in step_rels if r})
+            if known:
+                rel_s = f" · relevance {known[0]:.2f}" + (f"–{known[-1]:.2f}" if known[-1] != known[0] else "")
+            parts = []
+            for u, r in zip(uses, step_rels):
+                extra = ", ".join(x for x in (r, "truncated" if u.get("truncated") else None) if x)
+                parts.append(f"{u['step']} ({extra})" if extra else str(u["step"]))
+            used_s, trunc_s = f" · used in: {', '.join(parts)}", ""
+        lines.append(f"[{i}] {src_type} · {source}{rel_s}{used_s}{trunc_s}")
+        lines.append(f"    {str(chunk.get('text') or '')[:240].strip()}…")
         lines.append("")
     return "\n".join(lines)
 
@@ -277,7 +329,13 @@ def format_evidence(evidence: list) -> str:
 
 def do_ingest(vault_path: str, progress=gr.Progress()):
     """[UI-09] Yields log + reactive status bar after each file."""
-    path = vault_path.strip() or VAULT_DIR
+    # [SEC-02] Reject paths outside the permitted roots with a readable
+    # message (no traceback). ingest_vault re-validates as defence in depth.
+    try:
+        path = str(resolve_ingest_path(vault_path, default_vault=VAULT_DIR))
+    except (PathValidationError, ConfigError) as e:
+        yield f"⛔  Ingestion refused: {e}", build_status_html()
+        return
     for log_msg, fraction in ingest_vault(path):
         progress(fraction, desc="Indexing documents…")
         yield log_msg, build_status_html()
@@ -289,15 +347,20 @@ def do_chat(question: str, history: list, mode: str):
         yield history, "", ""
         return
 
+    # [RET-06] Snapshot PREVIOUS turns before adding the current question and
+    # placeholder; the engine gets an independent deep copy, so UI updates
+    # during streaming can't leak into its prompts.
+    prior_turns = copy.deepcopy(list(history or []))
+
     history = list(history or [])
     history.append({"role": "user", "content": question})
     history.append({"role": "assistant", "content": "⏳ Thinking…"})
     yield history, "", ""
 
     gen = (
-        rlm_query(question, history=history)
+        rlm_query(question, history=prior_turns)
         if mode == "🧠 Deep Reasoning"
-        else fast_query(question, history=history)
+        else fast_query(question, history=prior_turns)
     )
 
     for result in gen:
@@ -325,19 +388,72 @@ def do_clear_memory():
     return msg, build_status_html()
 
 
+# [EXP-01] Assistant texts that are UI/engine progress indicators, not answers.
+_EXPORT_PLACEHOLDERS = {
+    "⏳ Thinking…", "Thinking...", "Searching vault...", "Reasoning...",
+    "Retrieving sources...", "Analysing question...", "Decomposing question...",
+    "Researching sub-questions...", "Synthesising...", "Answering directly...",
+}
+_EXPORT_PROGRESS_RE = re.compile(r"^(Researching|Completed) \d+/\d+\.\.\.$")
+
+
+def _export_text(content) -> str:
+    """
+    [EXP-01] Readable text for one Chatbot message's content, for export only.
+    Gradio 6.12 normalises content to a list of blocks — {"type": "text",
+    "text"}, {"type": "file", "file": {...}, "alt_text"}, {"type":
+    "component", ...} — while messages appended in-process are plain strings.
+    Non-text parts become short labels (never server paths or Python reprs).
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, (list, tuple)):
+        return "\n".join(t for t in (_export_text(p) for p in content) if t)
+    if isinstance(content, dict):
+        kind = content.get("type")
+        if "text" in content and kind in (None, "text"):
+            return str(content["text"] or "")
+        if kind == "file" or "file" in content or "path" in content:
+            f = content.get("file") if isinstance(content.get("file"), dict) else content
+            name = (content.get("alt_text") or f.get("orig_name")
+                    or os.path.basename(str(f.get("path") or "")) or "file")
+            return f"[Attachment: {name}]"
+        if kind == "component":
+            return f"[{content.get('component') or 'component'} content]"
+        return "[non-text content]"
+    return "[non-text content]"
+
+
+def _is_exportable_answer(text: str) -> bool:
+    """False for placeholders, progress lines and error messages."""
+    t = text.strip()
+    return bool(t) and t not in _EXPORT_PLACEHOLDERS and not _EXPORT_PROGRESS_RE.match(t) \
+        and not t.startswith("❌")
+
+
 def do_export(history: list) -> str:
-    """[UI-05] Pull the last assistant answer for export."""
+    """
+    [UI-05, EXP-01] Return the most recent genuine assistant answer as plain
+    text. Placeholders, in-progress status lines and error messages are
+    skipped (the previous real answer is exported instead). `history` is
+    only read, never modified.
+    """
     if not history:
         return "No answer to export."
     for msg in reversed(history):
-        if msg.get("role") == "assistant" and msg.get("content") not in ("⏳ Thinking…", ""):
-            return msg["content"]
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        text = _export_text(msg.get("content")).strip()
+        if _is_exportable_answer(text):
+            return text
     return "No answer found."
 
 
 # ── Build UI ──────────────────────────────────────────────────────────────────
 
-with gr.Blocks(title="LifeVault") as demo:
+with gr.Blocks(title="LifeVault", analytics_enabled=False) as demo:  # [SEC-05]
 
     # ── Header ──────────────────────────────────────────────────────────────
     gr.HTML("""
@@ -480,14 +596,23 @@ with gr.Blocks(title="LifeVault") as demo:
 
         # ── Tab 3: Help ──────────────────────────────────────────────────────
         with gr.Tab("❓  Help"):
-            gr.Markdown("""
+            gr.Markdown(f"""
 ## Quick Start
 
-1. **Install Ollama** → [ollama.com](https://ollama.com) then run `ollama pull qwen2.5:7b`
+1. **Install Ollama** → [ollama.com](https://ollama.com) then run `ollama pull {_engine.OLLAMA_MODEL}`
 2. **Activate venv** → `source LIFEVAULT_1/bin/activate`
 3. **Start server** → `./scripts/start.sh` (or `python app.py`)
 4. **Ingest vault** → Go to **📁 Ingest Vault**, enter your folder path, click Ingest
 5. **Ask questions** → Go to **💬 Chat** and type your question
+
+---
+
+## Model
+
+- LifeVault uses **`{_engine.OLLAMA_MODEL}`** (`OLLAMA_MODEL` in `lifevault.py`). The header shows 🟢 only if that **exact** tag is installed; another size of the same model doesn't count.
+- See which models are installed: `ollama list`.
+- `qwen2.5:7b` is recommended for normal use. `qwen2.5:3b` is faster and fine for development, but in testing it made more reasoning and grounding mistakes.
+- To switch models: change `OLLAMA_MODEL` in `lifevault.py`, install that exact tag with `ollama pull <tag>`, then restart LifeVault (`./scripts/start.sh restart`).
 
 ---
 
@@ -515,7 +640,7 @@ with gr.Blocks(title="LifeVault") as demo:
 |---------|-----|
 | `Connection refused` | Run `ollama serve` in a terminal |
 | Empty answers | Click Ingest Vault first |
-| Slow responses | Use ⚡ Fast Lookup or try `llama3.2:3b` (lighter model) |
+| Slow responses | Use ⚡ Fast Lookup. A smaller model such as `qwen2.5:3b` is faster but less reliable — see **Model** above |
 | PDF not parsing | Run `pip install pdfplumber` |
 """)
 
@@ -526,11 +651,17 @@ if __name__ == "__main__":
     print("LifeVault Status:", h["message"])
     print("="*60 + "\n")
 
+    # [SEC-01] Bind per validated settings (default 127.0.0.1). auth is set
+    # whenever credentials are configured and is mandatory off-loopback.
+    # Never print SERVER_SETTINGS.auth — it holds the password.
+    s = SERVER_SETTINGS
+    print(f"Listening on {s.host}:{s.port} · login {'required' if s.auth_enabled else 'disabled (localhost only)'}")
     demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
+        server_name=s.host,
+        server_port=s.port,
+        auth=s.auth,
         share=False,
-        show_error=True,
+        show_error=s.is_local,
         css=CSS,
         theme=gr.themes.Base(),
     )
